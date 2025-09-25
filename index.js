@@ -630,6 +630,12 @@ class CLI {
   }
 
   async handlePush(account) {
+    // Show detailed status before pushing
+    await this.showDetailedStatus(account);
+
+    // Check remote status first
+    const remoteStatus = await this.checkRemoteStatus(account);
+
     // Check if there are uncommitted changes
     const hasUncommitted = await this.hasUncommittedChanges(account);
 
@@ -688,24 +694,117 @@ class CLI {
 
     await this.ensureBranchExists(account, currentBranch);
 
+    // Determine push options based on remote status
+    let pushChoices = [];
+    let defaultMessage = `Push to origin/${currentBranch}:`;
+
+    if (remoteStatus.needsForcePush) {
+      console.log(
+        chalk.yellow(
+          "⚠️ Remote has changes that conflict with your local branch!",
+        ),
+      );
+      console.log(
+        chalk.cyan("💡 Recommendation: Use force push or pull/merge first"),
+      );
+      defaultMessage = `⚠️ Conflicting changes detected - Choose push method:`;
+      pushChoices = [
+        { name: "🔄 Fetch and Force Push (Recommended)", value: "force-fetch" },
+        { name: "💥 Force Push (with lease)", value: "force-lease" },
+        { name: "⚡ Force Push (override)", value: "force-override" },
+        { name: "🚀 Try Normal Push (may fail)", value: "normal" },
+        { name: "❌ Cancel and handle manually", value: "cancel" },
+      ];
+    } else if (remoteStatus.remoteAhead) {
+      console.log(
+        chalk.blue("ℹ️ Remote branch has new commits you don't have locally"),
+      );
+      console.log(
+        chalk.cyan("💡 Recommendation: Pull first or force push to override"),
+      );
+      defaultMessage = `📥 Remote is ahead - Choose action:`;
+      pushChoices = [
+        { name: "📥 Pull and then push", value: "pull-push" },
+        { name: "💥 Force Push (with lease)", value: "force-lease" },
+        { name: "⚡ Force Push (override)", value: "force-override" },
+        { name: "❌ Cancel", value: "cancel" },
+      ];
+    } else if (remoteStatus.localAhead) {
+      console.log(
+        chalk.green("✅ Your local branch is ahead - normal push should work"),
+      );
+      pushChoices = [
+        { name: "🚀 Normal Push (Recommended)", value: "normal" },
+        { name: "💥 Force Push (with lease)", value: "force-lease" },
+        { name: "⚡ Force Push (override)", value: "force-override" },
+      ];
+    } else {
+      pushChoices = [
+        { name: "🚀 Normal Push", value: "normal" },
+        { name: "💥 Force Push (with lease)", value: "force-lease" },
+        { name: "⚡ Force Push (override)", value: "force-override" },
+        { name: "🔄 Fetch and Force Push", value: "force-fetch" },
+      ];
+    }
+
     const { pushType } = await inquirer.prompt([
       {
         type: "list",
         name: "pushType",
-        message: `Push to origin/${currentBranch}:`,
-        choices: [
-          { name: "🚀 Normal Push", value: "normal" },
-          { name: "💥 Force Push", value: "force" },
-        ],
+        message: defaultMessage,
+        choices: pushChoices,
       },
     ]);
 
+    if (pushType === "cancel") {
+      console.log(chalk.blue("📝 Push cancelled. Handle conflicts manually."));
+      return;
+    }
+
     try {
       let command;
-      if (pushType === "force") {
+
+      if (pushType === "pull-push") {
+        console.log(chalk.blue("📥 Pulling latest changes first..."));
+        try {
+          await GitManager.executeGitCommand(
+            `git pull origin ${currentBranch}`,
+            account,
+          );
+          console.log(chalk.green("✅ Successfully pulled changes"));
+          console.log(chalk.blue(`🔄 Now pushing to origin/${currentBranch}`));
+          command = `git push origin ${currentBranch}`;
+        } catch (pullError) {
+          console.log(chalk.red(`❌ Pull failed: ${pullError.message}`));
+          console.log(
+            chalk.yellow("💡 You may need to resolve conflicts manually"),
+          );
+          return;
+        }
+      } else if (pushType === "force-lease") {
         command = `git push --force-with-lease origin ${currentBranch}`;
         console.log(
-          chalk.yellow(`🔄 Force pushing to origin/${currentBranch}`),
+          chalk.yellow(
+            `🔄 Force pushing (with lease) to origin/${currentBranch}`,
+          ),
+        );
+      } else if (pushType === "force-override") {
+        console.log(chalk.red("⚠️ This will override any remote changes!"));
+        command = `git push --force origin ${currentBranch}`;
+        console.log(
+          chalk.red(`🔄 Force pushing (override) to origin/${currentBranch}`),
+        );
+      } else if (pushType === "force-fetch") {
+        console.log(chalk.blue("🔄 Fetching latest changes first..."));
+        await GitManager.executeGitCommand(
+          `git fetch origin ${currentBranch}`,
+          account,
+        );
+        command = `git push --force-with-lease origin ${currentBranch}`;
+        console.log(
+          chalk.yellow(
+            `🔄 Force pushing (with lease) to origin/${currentBranch}`,
+          ),
         );
       } else {
         command = `git push origin ${currentBranch}`;
@@ -1355,6 +1454,150 @@ class CLI {
     } catch {
       return false;
     }
+  }
+
+  async showDetailedStatus(account) {
+    try {
+      console.log(chalk.blue("📊 Repository Status:"));
+
+      // Check for staged changes
+      const stagedResult = await GitManager.executeGitCommand(
+        "git diff --cached --name-only",
+        account,
+      );
+      const stagedFiles = stagedResult.stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+
+      // Check for unstaged changes
+      const unstagedResult = await GitManager.executeGitCommand(
+        "git diff --name-only",
+        account,
+      );
+      const unstagedFiles = unstagedResult.stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+
+      // Check for untracked files
+      const untrackedResult = await GitManager.executeGitCommand(
+        "git ls-files --others --exclude-standard",
+        account,
+      );
+      const untrackedFiles = untrackedResult.stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+
+      if (stagedFiles.length > 0) {
+        console.log(
+          chalk.green(
+            `✅ Staged files (${stagedFiles.length}): ${stagedFiles.slice(0, 3).join(", ")}${stagedFiles.length > 3 ? "..." : ""}`,
+          ),
+        );
+      }
+
+      if (unstagedFiles.length > 0) {
+        console.log(
+          chalk.yellow(
+            `⚠️ Unstaged changes (${unstagedFiles.length}): ${unstagedFiles.slice(0, 3).join(", ")}${unstagedFiles.length > 3 ? "..." : ""}`,
+          ),
+        );
+      }
+
+      if (untrackedFiles.length > 0) {
+        console.log(
+          chalk.red(
+            `📄 Untracked files (${untrackedFiles.length}): ${untrackedFiles.slice(0, 3).join(", ")}${untrackedFiles.length > 3 ? "..." : ""}`,
+          ),
+        );
+      }
+
+      if (
+        stagedFiles.length === 0 &&
+        unstagedFiles.length === 0 &&
+        untrackedFiles.length === 0
+      ) {
+        console.log(chalk.green("✅ Working directory clean"));
+      }
+
+      console.log("");
+    } catch (error) {
+      console.log(chalk.gray("ℹ️ Could not fetch detailed status"));
+    }
+  }
+
+  async checkRemoteStatus(account) {
+    const status = {
+      remoteExists: false,
+      localAhead: false,
+      remoteAhead: false,
+      needsForcePush: false,
+      diverged: false,
+    };
+
+    try {
+      const currentBranch = await this.getCurrentBranch(account);
+
+      // Fetch latest remote info
+      console.log(chalk.gray("🔄 Checking remote status..."));
+      await GitManager.executeGitCommand(
+        `git fetch origin ${currentBranch}`,
+        account,
+      );
+
+      // Check if remote branch exists
+      try {
+        await GitManager.executeGitCommand(
+          `git rev-parse origin/${currentBranch}`,
+          account,
+        );
+        status.remoteExists = true;
+      } catch {
+        console.log(
+          chalk.blue("ℹ️ No remote branch found - first push will create it"),
+        );
+        return status;
+      }
+
+      // Compare local and remote commits
+      const statusResult = await GitManager.executeGitCommand(
+        `git rev-list --left-right --count ${currentBranch}...origin/${currentBranch}`,
+        account,
+      );
+
+      const [localCommits, remoteCommits] = statusResult.stdout
+        .trim()
+        .split("\t")
+        .map(Number);
+
+      status.localAhead = localCommits > 0;
+      status.remoteAhead = remoteCommits > 0;
+      status.diverged = status.localAhead && status.remoteAhead;
+      status.needsForcePush =
+        status.diverged || (status.remoteAhead && status.localAhead);
+
+      if (status.diverged) {
+        console.log(
+          chalk.yellow(
+            `⚠️ Branches have diverged: ${localCommits} local, ${remoteCommits} remote commits`,
+          ),
+        );
+      } else if (status.remoteAhead) {
+        console.log(chalk.blue(`📥 Remote is ${remoteCommits} commits ahead`));
+      } else if (status.localAhead) {
+        console.log(chalk.green(`📤 Local is ${localCommits} commits ahead`));
+      }
+    } catch (error) {
+      console.log(
+        chalk.gray(
+          "ℹ️ Could not check remote status - proceeding with normal options",
+        ),
+      );
+    }
+
+    return status;
   }
 
   async initializeRepository(account) {
