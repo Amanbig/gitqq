@@ -70,6 +70,29 @@ class ConfigManager {
   getAccounts() {
     return this.config.accounts || {};
   }
+
+  // Track if user has selected initial branch for this repo
+  isFirstTimeInRepo() {
+    const cwd = process.cwd();
+    return (
+      !this.config.repoSettings ||
+      !this.config.repoSettings[cwd] ||
+      !this.config.repoSettings[cwd].initialBranchSelected
+    );
+  }
+
+  setRepoInitialized(branchName) {
+    const cwd = process.cwd();
+    if (!this.config.repoSettings) {
+      this.config.repoSettings = {};
+    }
+    if (!this.config.repoSettings[cwd]) {
+      this.config.repoSettings[cwd] = {};
+    }
+    this.config.repoSettings[cwd].initialBranchSelected = true;
+    this.config.repoSettings[cwd].selectedBranch = branchName;
+    this.saveConfig();
+  }
 }
 
 // SSH Key Management
@@ -277,25 +300,38 @@ class CLI {
       if (repoStatus.hasHttpsRemote) {
         console.log(
           chalk.yellow(
-            "⚠️ HTTPS remote detected. For multiple accounts, SSH is recommended.",
+            "⚠️ Remote is using HTTPS. Converting to SSH for account switching...",
           ),
         );
-        const { shouldConvert } = await inquirer.prompt([
-          {
-            type: "list",
-            name: "shouldConvert",
-            message: "Convert to SSH remote?",
-            choices: [
-              { name: "✅ Yes, convert to SSH", value: true },
-              { name: "❌ No, keep HTTPS", value: false },
-            ],
-          },
-        ]);
+        await this.convertToSSHRemote(currentAccount);
+      }
 
-        if (shouldConvert) {
-          await this.convertToSSHRemote(currentAccount);
+      if (!repoStatus.isGitRepo) {
+        continue;
+      }
+
+      // Check if this is the first time using the tool in this repo
+      if (this.config.isFirstTimeInRepo()) {
+        console.log(
+          chalk.cyan("🎯 First time using this tool in this repository!"),
+        );
+        console.log(
+          chalk.cyan("📋 Please select which branch you'd like to work with:"),
+        );
+
+        const selectedBranch = await this.selectInitialBranch(currentAccount);
+        if (selectedBranch) {
+          this.config.setRepoInitialized(selectedBranch);
+          this.setDefaultBranch(selectedBranch);
+        } else {
+          return; // User chose to go back
         }
       }
+
+      await this.ensureBranchExists(
+        currentAccount,
+        this.getDefaultBranch() || "main",
+      );
 
       const currentBranch = await this.getCurrentBranch(currentAccount);
       const defaultBranch = this.getDefaultBranch();
@@ -761,6 +797,143 @@ class CLI {
     }
   }
 
+  async selectInitialBranch(account) {
+    try {
+      const result = await GitManager.executeGitCommand(
+        "git branch -a",
+        account,
+      );
+      const allBranches = result.stdout
+        .split("\n")
+        .map((b) => b.replace(/^\*?\s+(remotes\/origin\/)?/, "").trim())
+        .filter(Boolean)
+        .filter((branch) => !branch.includes("HEAD ->"))
+        .filter((branch, index, arr) => arr.indexOf(branch) === index); // Remove duplicates
+
+      const localResult = await GitManager.executeGitCommand(
+        "git branch",
+        account,
+      );
+      const localBranches = localResult.stdout
+        .split("\n")
+        .map((b) => b.replace(/^\*?\s+/, "").trim())
+        .filter(Boolean);
+
+      const choices = [];
+
+      if (allBranches.length > 0) {
+        allBranches.forEach((branch) => {
+          const isLocal = localBranches.includes(branch);
+          choices.push({
+            name: `🌿 ${branch}${isLocal ? "" : " (remote)"}`,
+            value: branch,
+          });
+        });
+      }
+
+      choices.push(
+        new inquirer.Separator(),
+        { name: "🆕 Create New Branch", value: "create-new" },
+        new inquirer.Separator(),
+        { name: "🔙 Back to Homepage", value: "back" },
+        { name: "❌ Exit", value: "exit" },
+      );
+
+      const { selectedBranch } = await inquirer.prompt([
+        {
+          type: "list",
+          name: "selectedBranch",
+          message: "Select initial branch to work with:",
+          choices,
+        },
+      ]);
+
+      if (selectedBranch === "exit") {
+        console.log(chalk.blue("👋 Goodbye!"));
+        process.exit(0);
+      }
+
+      if (selectedBranch === "back") {
+        return null;
+      }
+
+      if (selectedBranch === "create-new") {
+        const branchInfo = await inquirer.prompt([
+          {
+            type: "input",
+            name: "newBranchName",
+            message: "New branch name:",
+            validate: (input) =>
+              input.trim().length > 0 || "Branch name is required",
+          },
+          {
+            type: "list",
+            name: "createRemote",
+            message: "Create branch on GitHub as well?",
+            choices: [
+              { name: "🌐 Create both local and remote", value: true },
+              { name: "💻 Create only local branch", value: false },
+            ],
+          },
+        ]);
+
+        console.log(
+          chalk.blue(
+            `🔄 Creating and switching to branch: ${branchInfo.newBranchName}`,
+          ),
+        );
+        await GitManager.executeGitCommand(
+          `git checkout -b ${branchInfo.newBranchName}`,
+          account,
+        );
+
+        if (branchInfo.createRemote) {
+          try {
+            console.log(chalk.blue(`🌐 Creating remote branch on GitHub...`));
+            await GitManager.executeGitCommand(
+              `git push -u origin ${branchInfo.newBranchName}`,
+              account,
+            );
+            console.log(chalk.green("✅ Remote branch created successfully"));
+          } catch (error) {
+            console.log(
+              chalk.yellow(
+                `⚠️ Local branch created, but failed to create remote: ${error.message}`,
+              ),
+            );
+          }
+        }
+
+        return branchInfo.newBranchName;
+      } else {
+        const isLocal = localBranches.includes(selectedBranch);
+        if (isLocal) {
+          console.log(chalk.blue(`🔄 Switching to branch: ${selectedBranch}`));
+          await GitManager.executeGitCommand(
+            `git checkout ${selectedBranch}`,
+            account,
+          );
+        } else {
+          console.log(
+            chalk.blue(
+              `🔄 Creating local branch from remote: ${selectedBranch}`,
+            ),
+          );
+          await GitManager.executeGitCommand(
+            `git checkout -b ${selectedBranch} origin/${selectedBranch}`,
+            account,
+          );
+        }
+        return selectedBranch;
+      }
+    } catch (error) {
+      console.log(
+        chalk.yellow("⚠️ Could not fetch branches, using 'main' as default"),
+      );
+      return "main";
+    }
+  }
+
   async handleChangeBranch(account) {
     try {
       const result = await GitManager.executeGitCommand("git branch", account);
@@ -769,10 +942,20 @@ class CLI {
         .map((b) => b.replace(/^\*?\s+/, "").trim())
         .filter(Boolean);
 
+      const currentBranch = await this.getCurrentBranch(account);
+
       const choices = [
-        ...branches.map((branch) => ({ name: `🌿 ${branch}`, value: branch })),
+        ...branches.map((branch) => ({
+          name: `🌿 ${branch}${branch === currentBranch ? " (current)" : ""}`,
+          value: branch,
+        })),
         new inquirer.Separator(),
         { name: "🆕 Create New Branch", value: "create-new" },
+        { name: "🌿 Advanced Branch Creation", value: "advanced-create" },
+        { name: "🗑️  Delete Branch", value: "delete-branch" },
+        new inquirer.Separator(),
+        { name: "🔙 Back to Homepage", value: "back" },
+        { name: "❌ Exit", value: "exit" },
       ];
 
       const { selectedBranch } = await inquirer.prompt([
@@ -784,8 +967,27 @@ class CLI {
         },
       ]);
 
+      if (selectedBranch === "exit") {
+        console.log(chalk.blue("👋 Goodbye!"));
+        process.exit(0);
+      }
+
+      if (selectedBranch === "back") {
+        return;
+      }
+
+      if (selectedBranch === "delete-branch") {
+        await this.handleDeleteBranch(account);
+        return;
+      }
+
+      if (selectedBranch === "advanced-create") {
+        await this.handleAdvancedBranchCreation(account, branches);
+        return;
+      }
+
       if (selectedBranch === "create-new") {
-        const { newBranchName } = await inquirer.prompt([
+        const branchInfo = await inquirer.prompt([
           {
             type: "input",
             name: "newBranchName",
@@ -793,17 +995,46 @@ class CLI {
             validate: (input) =>
               input.trim().length > 0 || "Branch name is required",
           },
+          {
+            type: "list",
+            name: "createRemote",
+            message: "Create branch on GitHub as well?",
+            choices: [
+              { name: "🌐 Create both local and remote", value: true },
+              { name: "💻 Create only local branch", value: false },
+            ],
+          },
         ]);
 
         console.log(
-          chalk.blue(`🔄 Creating and switching to branch: ${newBranchName}`),
+          chalk.blue(
+            `🔄 Creating and switching to branch: ${branchInfo.newBranchName}`,
+          ),
         );
         await GitManager.executeGitCommand(
-          `git checkout -b ${newBranchName}`,
+          `git checkout -b ${branchInfo.newBranchName}`,
           account,
         );
-        this.setDefaultBranch(newBranchName);
-      } else {
+
+        if (branchInfo.createRemote) {
+          try {
+            console.log(chalk.blue(`🌐 Creating remote branch on GitHub...`));
+            await GitManager.executeGitCommand(
+              `git push -u origin ${branchInfo.newBranchName}`,
+              account,
+            );
+            console.log(chalk.green("✅ Remote branch created successfully"));
+          } catch (error) {
+            console.log(
+              chalk.yellow(
+                `⚠️ Local branch created, but failed to create remote: ${error.message}`,
+              ),
+            );
+          }
+        }
+
+        this.setDefaultBranch(branchInfo.newBranchName);
+      } else if (selectedBranch !== currentBranch) {
         console.log(chalk.blue(`🔄 Switching to branch: ${selectedBranch}`));
         await GitManager.executeGitCommand(
           `git checkout ${selectedBranch}`,
@@ -812,10 +1043,252 @@ class CLI {
         this.setDefaultBranch(selectedBranch);
       }
 
-      console.log(chalk.green("✅ Branch changed successfully"));
+      console.log(chalk.green("✅ Branch operation completed"));
     } catch (error) {
       console.log(chalk.red(`❌ Branch operation failed: ${error.message}`));
     }
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+
+  async handleDeleteBranch(account) {
+    try {
+      const result = await GitManager.executeGitCommand("git branch", account);
+      const branches = result.stdout
+        .split("\n")
+        .map((b) => b.replace(/^\*?\s+/, "").trim())
+        .filter(Boolean);
+
+      const currentBranch = await this.getCurrentBranch(account);
+      const deletableBranches = branches.filter(
+        (branch) => branch !== currentBranch,
+      );
+
+      if (deletableBranches.length === 0) {
+        console.log(
+          chalk.yellow(
+            "⚠️ No branches available to delete (can't delete current branch)",
+          ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        return;
+      }
+
+      const { branchToDelete } = await inquirer.prompt([
+        {
+          type: "list",
+          name: "branchToDelete",
+          message: "Select branch to delete:",
+          choices: [
+            ...deletableBranches.map((branch) => ({
+              name: `🗑️  ${branch}`,
+              value: branch,
+            })),
+            new inquirer.Separator(),
+            { name: "🔙 Back", value: "back" },
+          ],
+        },
+      ]);
+
+      if (branchToDelete === "back") {
+        return;
+      }
+
+      // Check if branch exists on remote
+      let remoteExists = false;
+      try {
+        const remoteResult = await GitManager.executeGitCommand(
+          `git ls-remote --heads origin ${branchToDelete}`,
+          account,
+        );
+        remoteExists = remoteResult.stdout.trim().length > 0;
+      } catch (error) {
+        // Remote might not exist or no connection
+      }
+
+      if (remoteExists) {
+        const { deleteRemote } = await inquirer.prompt([
+          {
+            type: "list",
+            name: "deleteRemote",
+            message: `Branch '${branchToDelete}' exists on remote. Delete from GitHub too?`,
+            choices: [
+              { name: "🌐 Delete both local and remote", value: true },
+              { name: "💻 Delete only local branch", value: false },
+              { name: "❌ Cancel", value: "cancel" },
+            ],
+          },
+        ]);
+
+        if (deleteRemote === "cancel") {
+          return;
+        }
+
+        if (deleteRemote) {
+          console.log(
+            chalk.yellow(
+              `🔄 Deleting branch '${branchToDelete}' from remote...`,
+            ),
+          );
+          try {
+            await GitManager.executeGitCommand(
+              `git push origin --delete ${branchToDelete}`,
+              account,
+            );
+            console.log(chalk.green("✅ Remote branch deleted successfully"));
+          } catch (error) {
+            console.log(
+              chalk.red(`❌ Failed to delete remote branch: ${error.message}`),
+            );
+          }
+        }
+      }
+
+      // Delete local branch
+      console.log(
+        chalk.yellow(`🔄 Deleting local branch '${branchToDelete}'...`),
+      );
+      try {
+        await GitManager.executeGitCommand(
+          `git branch -D ${branchToDelete}`,
+          account,
+        );
+        console.log(chalk.green("✅ Local branch deleted successfully"));
+      } catch (error) {
+        console.log(
+          chalk.red(`❌ Failed to delete local branch: ${error.message}`),
+        );
+      }
+    } catch (error) {
+      console.log(
+        chalk.red(`❌ Delete branch operation failed: ${error.message}`),
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+
+  async handleAdvancedBranchCreation(account, availableBranches) {
+    try {
+      console.log(chalk.cyan("🌿 Advanced Branch Creation"));
+
+      const branchConfig = await inquirer.prompt([
+        {
+          type: "input",
+          name: "newBranchName",
+          message: "New branch name:",
+          validate: (input) =>
+            input.trim().length > 0 || "Branch name is required",
+        },
+        {
+          type: "list",
+          name: "baseBranch",
+          message: "Create branch from:",
+          choices: [
+            { name: "🌿 Current branch", value: "current" },
+            ...availableBranches.map((branch) => ({
+              name: `🌿 ${branch}`,
+              value: branch,
+            })),
+            new inquirer.Separator(),
+            { name: "🔍 Specify remote branch", value: "remote" },
+          ],
+        },
+      ]);
+
+      let baseBranch = branchConfig.baseBranch;
+
+      if (baseBranch === "current") {
+        baseBranch = await this.getCurrentBranch(account);
+      }
+
+      if (baseBranch === "remote") {
+        const { remoteBranch } = await inquirer.prompt([
+          {
+            type: "input",
+            name: "remoteBranch",
+            message: "Remote branch name (e.g., origin/feature-branch):",
+            validate: (input) =>
+              input.trim().length > 0 || "Remote branch name is required",
+          },
+        ]);
+        baseBranch = remoteBranch;
+      }
+
+      const { createOptions } = await inquirer.prompt([
+        {
+          type: "list",
+          name: "createOptions",
+          message: "Branch creation options:",
+          choices: [
+            { name: "💻 Create only local branch", value: "local" },
+            { name: "🌐 Create local and push to remote", value: "remote" },
+            { name: "🚀 Create, push and set upstream", value: "upstream" },
+          ],
+        },
+      ]);
+
+      // Create the branch
+      if (baseBranch === (await this.getCurrentBranch(account))) {
+        console.log(
+          chalk.blue(
+            `🔄 Creating branch '${branchConfig.newBranchName}' from current branch...`,
+          ),
+        );
+        await GitManager.executeGitCommand(
+          `git checkout -b ${branchConfig.newBranchName}`,
+          account,
+        );
+      } else {
+        console.log(
+          chalk.blue(
+            `🔄 Creating branch '${branchConfig.newBranchName}' from '${baseBranch}'...`,
+          ),
+        );
+        await GitManager.executeGitCommand(
+          `git checkout -b ${branchConfig.newBranchName} ${baseBranch}`,
+          account,
+        );
+      }
+
+      console.log(chalk.green("✅ Local branch created successfully"));
+
+      // Handle remote creation based on options
+      if (createOptions === "remote" || createOptions === "upstream") {
+        try {
+          console.log(chalk.blue(`🌐 Pushing to remote GitHub...`));
+
+          if (createOptions === "upstream") {
+            await GitManager.executeGitCommand(
+              `git push -u origin ${branchConfig.newBranchName}`,
+              account,
+            );
+            console.log(chalk.green("✅ Branch pushed and upstream set"));
+          } else {
+            await GitManager.executeGitCommand(
+              `git push origin ${branchConfig.newBranchName}`,
+              account,
+            );
+            console.log(chalk.green("✅ Branch pushed to remote"));
+          }
+        } catch (error) {
+          console.log(
+            chalk.yellow(
+              `⚠️ Local branch created, but failed to push to remote: ${error.message}`,
+            ),
+          );
+        }
+      }
+
+      this.setDefaultBranch(branchConfig.newBranchName);
+      console.log(chalk.green("🎉 Advanced branch creation completed!"));
+    } catch (error) {
+      console.log(
+        chalk.red(`❌ Advanced branch creation failed: ${error.message}`),
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
 
   async executeCustomCommand(account) {
