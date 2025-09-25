@@ -649,6 +649,7 @@ class CLI {
         localAhead: false,
         remoteAhead: false,
         needsForcePush: false,
+        diverged: false,
       };
     }
 
@@ -716,6 +717,20 @@ class CLI {
 
     await this.ensureBranchExists(account, currentBranch);
 
+    // Check if there's nothing to push
+    if (
+      !hasUncommitted &&
+      remoteStatus.remoteExists &&
+      !remoteStatus.localAhead &&
+      !remoteStatus.remoteAhead
+    ) {
+      console.log(
+        chalk.yellow("ℹ️ Everything is up to date - nothing to push"),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      return;
+    }
+
     // Determine push options based on remote status
     let pushChoices = [];
     let defaultMessage = `Push to origin/${currentBranch}:`;
@@ -769,18 +784,12 @@ class CLI {
         { name: "🔄 Force Push (with lease)", value: "force-lease" },
       ];
     } else {
-      // Fallback when we can't determine status - offer all options
-      console.log(
-        chalk.yellow("⚠️ Could not determine branch status - choose carefully"),
-      );
-      defaultMessage = `⚠️ Unknown status - Choose push method:`;
+      // Branches are in sync - normal push should work
       pushChoices = [
-        { name: "🚀 Try Normal Push", value: "normal" },
-        { name: "📥 Pull first then push", value: "pull-push" },
-        { name: "🔄 Fetch and Force Push", value: "force-fetch" },
+        { name: "🚀 Normal Push", value: "normal" },
         { name: "💥 Force Push (with lease)", value: "force-lease" },
         { name: "⚡ Force Push (override)", value: "force-override" },
-        { name: "❌ Cancel", value: "cancel" },
+        { name: "🔄 Fetch and Force Push", value: "force-fetch" },
       ];
     }
 
