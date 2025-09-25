@@ -1,0 +1,54 @@
+{
+  "name": "gitqq",
+  "version": "1.0.0",
+  "description": "A simple CLI tool for managing multiple GitHub accounts with SSH keys",
+  "main": "index.js",
+  "bin": {
+    "gitqq": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "install-global": "npm install -g ."
+  },
+  "keywords": [
+    "github",
+    "git",
+    "ssh",
+    "multiple-accounts",
+    "cli"
+  ],
+  "author": {
+    "name": "Amanbig",
+    "email": "amanpreetsinghjhiwant@outlook.com"
+  },
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Amanbig/gitqq.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Amanbig/gitqq/issues"
+  },
+  "homepage": "https://github.com/Amanbig/gitqq#readme",
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "inquirer": "^8.2.6"
+  },
+  "preferGlobal": true
+}
