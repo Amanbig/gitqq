@@ -634,7 +634,23 @@ class CLI {
     await this.showDetailedStatus(account);
 
     // Check remote status first
-    const remoteStatus = await this.checkRemoteStatus(account);
+    console.log(chalk.gray("🔄 Checking remote status..."));
+    let remoteStatus;
+    try {
+      remoteStatus = await this.checkRemoteStatus(account);
+    } catch (error) {
+      console.log(
+        chalk.yellow(
+          "⚠️ Could not check remote status, proceeding with basic options",
+        ),
+      );
+      remoteStatus = {
+        remoteExists: false,
+        localAhead: false,
+        remoteAhead: false,
+        needsForcePush: false,
+      };
+    }
 
     // Check if there are uncommitted changes
     const hasUncommitted = await this.hasUncommittedChanges(account);
@@ -675,15 +691,21 @@ class CLI {
 
         try {
           if (addAll) {
+            console.log(chalk.blue("🔄 Staging all files..."));
             await GitManager.executeGitCommand("git add .", account);
           }
+          console.log(chalk.blue("🔄 Creating commit..."));
           await GitManager.executeGitCommand(
-            `git commit -m "${commitMessage}"`,
+            `git commit -m "${commitMessage.replace(/"/g, '\\"')}"`,
             account,
           );
           console.log(chalk.green("✅ Changes committed"));
         } catch (error) {
-          console.log(chalk.red(`❌ Commit failed: ${error.message}`));
+          if (error.message.includes("nothing to commit")) {
+            console.log(chalk.yellow("ℹ️ No changes to commit"));
+          } else {
+            console.log(chalk.red(`❌ Commit failed: ${error.message}`));
+          }
           return;
         }
       }
@@ -738,12 +760,27 @@ class CLI {
         { name: "💥 Force Push (with lease)", value: "force-lease" },
         { name: "⚡ Force Push (override)", value: "force-override" },
       ];
-    } else {
+    } else if (!remoteStatus.remoteExists) {
+      console.log(
+        chalk.blue("ℹ️ No remote branch found - creating new remote branch"),
+      );
       pushChoices = [
-        { name: "🚀 Normal Push", value: "normal" },
+        { name: "🚀 Push and create remote branch", value: "normal" },
+        { name: "🔄 Force Push (with lease)", value: "force-lease" },
+      ];
+    } else {
+      // Fallback when we can't determine status - offer all options
+      console.log(
+        chalk.yellow("⚠️ Could not determine branch status - choose carefully"),
+      );
+      defaultMessage = `⚠️ Unknown status - Choose push method:`;
+      pushChoices = [
+        { name: "🚀 Try Normal Push", value: "normal" },
+        { name: "📥 Pull first then push", value: "pull-push" },
+        { name: "🔄 Fetch and Force Push", value: "force-fetch" },
         { name: "💥 Force Push (with lease)", value: "force-lease" },
         { name: "⚡ Force Push (override)", value: "force-override" },
-        { name: "🔄 Fetch and Force Push", value: "force-fetch" },
+        { name: "❌ Cancel", value: "cancel" },
       ];
     }
 
@@ -1540,12 +1577,19 @@ class CLI {
     try {
       const currentBranch = await this.getCurrentBranch(account);
 
-      // Fetch latest remote info
-      console.log(chalk.gray("🔄 Checking remote status..."));
-      await GitManager.executeGitCommand(
-        `git fetch origin ${currentBranch}`,
-        account,
-      );
+      // Fetch latest remote info quietly
+      try {
+        await GitManager.executeGitCommand(
+          `git fetch origin ${currentBranch}`,
+          account,
+        );
+      } catch (fetchError) {
+        // If fetch fails, remote might not exist
+        console.log(
+          chalk.blue("ℹ️ Remote branch not found or no network connection"),
+        );
+        return status;
+      }
 
       // Check if remote branch exists
       try {
@@ -1562,32 +1606,42 @@ class CLI {
       }
 
       // Compare local and remote commits
-      const statusResult = await GitManager.executeGitCommand(
-        `git rev-list --left-right --count ${currentBranch}...origin/${currentBranch}`,
-        account,
-      );
-
-      const [localCommits, remoteCommits] = statusResult.stdout
-        .trim()
-        .split("\t")
-        .map(Number);
-
-      status.localAhead = localCommits > 0;
-      status.remoteAhead = remoteCommits > 0;
-      status.diverged = status.localAhead && status.remoteAhead;
-      status.needsForcePush =
-        status.diverged || (status.remoteAhead && status.localAhead);
-
-      if (status.diverged) {
-        console.log(
-          chalk.yellow(
-            `⚠️ Branches have diverged: ${localCommits} local, ${remoteCommits} remote commits`,
-          ),
+      try {
+        const statusResult = await GitManager.executeGitCommand(
+          `git rev-list --left-right --count ${currentBranch}...origin/${currentBranch}`,
+          account,
         );
-      } else if (status.remoteAhead) {
-        console.log(chalk.blue(`📥 Remote is ${remoteCommits} commits ahead`));
-      } else if (status.localAhead) {
-        console.log(chalk.green(`📤 Local is ${localCommits} commits ahead`));
+
+        const counts = statusResult.stdout.trim().split(/\s+/);
+        const localCommits = parseInt(counts[0]) || 0;
+        const remoteCommits = parseInt(counts[1]) || 0;
+
+        status.localAhead = localCommits > 0;
+        status.remoteAhead = remoteCommits > 0;
+        status.diverged = status.localAhead && status.remoteAhead;
+        status.needsForcePush = status.diverged;
+
+        if (status.diverged) {
+          console.log(
+            chalk.yellow(
+              `⚠️ Branches have diverged: ${localCommits} local, ${remoteCommits} remote commits`,
+            ),
+          );
+        } else if (status.remoteAhead) {
+          console.log(
+            chalk.blue(`📥 Remote is ${remoteCommits} commits ahead`),
+          );
+        } else if (status.localAhead) {
+          console.log(chalk.green(`📤 Local is ${localCommits} commits ahead`));
+        } else {
+          console.log(chalk.green("✅ Branches are in sync"));
+        }
+      } catch (compareError) {
+        // If we can't compare, assume they might be diverged
+        console.log(
+          chalk.yellow("⚠️ Could not compare branches - use caution"),
+        );
+        status.needsForcePush = true;
       }
     } catch (error) {
       console.log(

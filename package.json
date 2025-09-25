@@ -1,6 +1,6 @@
 {
   "name": "gitqq",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "A simple CLI tool for managing multiple GitHub accounts with SSH keys",
   "main": "index.js",
   "bin": {
